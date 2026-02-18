@@ -14,6 +14,7 @@ class User(AsyncAttrs, Base):
     subscription_end_date = Column(DateTime, nullable=True)
     is_blocked = Column(Boolean, default=False)
     draft_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
     
     ads = relationship("Ad", back_populates="owner", foreign_keys="Ad.user_id")
 
@@ -39,8 +40,8 @@ class Ad(AsyncAttrs, Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, ForeignKey('users.user_id'))
     
-    title = Column(String, nullable=True)
-    photos = Column(JSON, default=[]) 
+    title = Column(String, nullable=True) 
+    photos = Column(JSON, default=list)
     description = Column(String, nullable=True)
     price = Column(String, nullable=True)
     phone = Column(String, nullable=True)
@@ -70,3 +71,7 @@ class GlobalSettings(AsyncAttrs, Base):
     post_duration_hours = Column(Integer, default=24)
     post_frequency_hours = Column(Integer, default=4)
     target_channels = Column(JSON, default=[]) # List of channel IDs as strings or ints
+    daily_check_hour = Column(Integer, default=9)  # Daily availability check hour (UTC)
+    daily_check_minute = Column(Integer, default=0)  # Daily availability check minute (UTC)
+    cleanup_hour = Column(Integer, nullable=True)  # Scheduled cleanup hour (UTC)
+    cleanup_minute = Column(Integer, nullable=True)  # Scheduled cleanup minute (UTC)

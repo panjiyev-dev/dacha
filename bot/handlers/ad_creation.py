@@ -1,4 +1,5 @@
 # ad_creation.py
+import json
 from aiogram import Router, types, F
 from aiogram.filters import Command, StateFilter, or_f
 from aiogram.fsm.context import FSMContext
@@ -14,8 +15,54 @@ from datetime import datetime, timedelta
 
 from bot.utils.ad_limits import has_free_slot, has_daily_quota, MAX_ADS_PER_USER
 from config import SUPER_ADMIN_IDS, DAILY_AD_LIMIT
+from bot.utils.channel import delete_ad_everywhere
 
 router = Router()
+
+
+def normalize_photos(raw) -> list[str]:
+    """
+    DB'dan keladigan photos har xil bo'lishi mumkin:
+    - list: ["file_id1", ...]
+    - json string: '["file_id1", ...]'
+    - double json: '"[\\"file_id1\\", ...]"'
+    - bo'sh / None
+    Shu hammasini bir xil list[str] ko'rinishiga keltiradi.
+    """
+    if not raw:
+        return []
+
+    # allaqachon list bo'lsa
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, str) and x.strip()]
+
+    # string bo'lsa parse qilamiz
+    if isinstance(raw, str):
+        s = raw.strip()
+
+        # ba'zida DB ga "[]" yoki "" tushib qoladi
+        if s in ("[]", '""', "''"):
+            return []
+
+        try:
+            obj = json.loads(s)  # 1-marta
+            # double-json bo'lsa, yana bir marta
+            if isinstance(obj, str):
+                obj2 = json.loads(obj)
+                obj = obj2
+            if isinstance(obj, list):
+                return [x for x in obj if isinstance(x, str) and x.strip()]
+        except Exception:
+            return []
+
+    return []
+
+
+async def get_user_lang(user_id: int) -> str:
+    async with async_session() as session:
+        res = await session.execute(select(User).where(User.user_id == user_id))
+        user = res.scalar_one_or_none()
+        return (user.language if user and user.language else "uz")
 
 
 def is_super_admin(user_id: int) -> bool:
@@ -27,13 +74,6 @@ def get_kb(buttons: list):
         keyboard=[[types.KeyboardButton(text=b) for b in row] for row in buttons],
         resize_keyboard=True
     )
-
-
-async def get_user_lang(user_id: int) -> str:
-    async with async_session() as session:
-        res = await session.execute(select(User).where(User.user_id == user_id))
-        user = res.scalar_one_or_none()
-        return user.language if user else "uz"
 
 
 @router.message(StateFilter(None), Command("create_ad"))
@@ -65,13 +105,10 @@ async def start_ad_creation(message: types.Message, state: FSMContext, lang: str
             return
 
         # 2) Subscription/aktivlik tekshiruvi:
-        # Glavni admin cheksiz: subscription_end_date ni uzoq qo‘yib yuboramiz
         if is_super_admin(user_id):
             if not user.subscription_end_date or user.subscription_end_date < datetime.utcnow():
                 user.subscription_end_date = datetime.utcnow() + timedelta(days=36500)
         else:
-            # Oddiy userlarda subscription_end_date o‘tib ketgan bo‘lsa — to‘xtatamiz.
-            # (Sizning 1-martalik kod aktivatsiyasi boshqa faylda subscription_end_date ni uzaytirishi kerak.)
             if not user.subscription_end_date or user.subscription_end_date < datetime.utcnow():
                 await message.answer(i18n.get("sub_expired", lang), parse_mode="HTML")
                 await session.commit()
@@ -119,38 +156,52 @@ async def handle_draft_choice(message: types.Message, state: FSMContext, lang: s
             ad_res = await session.execute(select(Ad).where(Ad.id == ad_id))
             ad = ad_res.scalar_one()
 
+            # ✅ photosni normalize qilamiz
+            ad_photos = normalize_photos(ad.photos)
+            await state.update_data(photos=ad_photos)
+
             if not ad.title:
-                await message.answer(i18n.get("step_1_title", lang),
-                                     reply_markup=types.ReplyKeyboardRemove(),
-                                     parse_mode="HTML")
+                await message.answer(
+                    i18n.get("step_1_title", lang),
+                    reply_markup=types.ReplyKeyboardRemove(),
+                    parse_mode="HTML"
+                )
                 await state.set_state(AdCreationStates.title)
+
             elif not ad.description:
-                await message.answer(i18n.get("step_2_desc", lang),
-                                     reply_markup=types.ReplyKeyboardRemove(),
-                                     parse_mode="HTML")
+                await message.answer(
+                    i18n.get("step_2_desc", lang),
+                    reply_markup=types.ReplyKeyboardRemove(),
+                    parse_mode="HTML"
+                )
                 await state.set_state(AdCreationStates.description)
+
+            elif not ad.phone:
+                await message.answer(
+                    i18n.get("step_5_phone", lang),
+                    reply_markup=types.ReplyKeyboardRemove(),
+                    parse_mode="HTML"
+                )
+                await state.set_state(AdCreationStates.phone)
+
             elif not ad.price:
-                await message.answer(i18n.get("step_3_price", lang),
-                                     reply_markup=types.ReplyKeyboardRemove(),
-                                     parse_mode="HTML")
+                await message.answer(
+                    i18n.get("step_3_price", lang),
+                    reply_markup=types.ReplyKeyboardRemove(),
+                    parse_mode="HTML"
+                )
                 await state.set_state(AdCreationStates.price)
-            elif not ad.photos or len(ad.photos) < 4:
-                count = len(ad.photos or [])
-                await state.update_data(photos=ad.photos or [])
+
+            else:
+                count = len(ad_photos)
                 await message.answer(
                     i18n.get("step_4_photos", lang) + f"\n\n📊 <i>{count}/6</i>",
                     reply_markup=get_kb([[i18n.get("btn_done", lang)]]),
                     parse_mode="HTML"
                 )
                 await state.set_state(AdCreationStates.photos)
-            else:
-                await message.answer(i18n.get("step_5_phone", lang),
-                                     reply_markup=types.ReplyKeyboardRemove(),
-                                     parse_mode="HTML")
-                await state.set_state(AdCreationStates.phone)
 
         elif choice == i18n.get("btn_start_over", lang):
-            # draftni tozalaymiz: eski draft_id ni olib tashlaymiz, yangi draft yaratamiz
             user.draft_id = None
             await session.commit()
             await start_ad_creation(message, state, lang)
@@ -178,6 +229,19 @@ async def process_desc(message: types.Message, state: FSMContext, lang: str):
         await session.execute(update(Ad).where(Ad.id == ad_id).values(description=message.text))
         await session.commit()
 
+    await message.answer(i18n.get("step_5_phone", lang), parse_mode="HTML")
+    await state.set_state(AdCreationStates.phone)
+
+
+@router.message(AdCreationStates.phone, F.text)
+async def process_phone(message: types.Message, state: FSMContext, lang: str):
+    data = await state.get_data()
+    ad_id = data.get("ad_id")
+
+    async with async_session() as session:
+        await session.execute(update(Ad).where(Ad.id == ad_id).values(phone=message.text))
+        await session.commit()
+
     await message.answer(i18n.get("step_3_price", lang), parse_mode="HTML")
     await state.set_state(AdCreationStates.price)
 
@@ -191,9 +255,9 @@ async def process_price(message: types.Message, state: FSMContext, lang: str):
         await session.execute(update(Ad).where(Ad.id == ad_id).values(price=message.text))
         await session.commit()
 
-    photos = data.get("photos", [])
+    count = len(data.get("photos", []))
     await message.answer(
-        i18n.get("step_4_photos", lang) + f"\n\n📊 <i>{len(photos)}/6</i>",
+        i18n.get("step_4_photos", lang) + f"\n\n📊 <i>{count}/6</i>",
         reply_markup=get_kb([[i18n.get("btn_done", lang)]]),
         parse_mode="HTML"
     )
@@ -204,9 +268,19 @@ async def process_price(message: types.Message, state: FSMContext, lang: str):
 async def process_photos(message: types.Message, state: FSMContext, lang: str):
     data = await state.get_data()
     photos = data.get("photos", [])
+    photos = normalize_photos(photos)  # state'da ham ba'zida string tushib qolsa
+
+    # 6 tadan oshirmaymiz
+    if len(photos) >= 6:
+        await message.answer(i18n.get("photo_max", lang), reply_markup=get_kb([[i18n.get("btn_done", lang)]]))
+        return
 
     file_id = message.photo[-1].file_id
-    photos.append(file_id)
+
+    # duplicate qo'shmaymiz
+    if file_id not in photos:
+        photos.append(file_id)
+
     await state.update_data(photos=photos)
 
     count = len(photos)
@@ -228,46 +302,44 @@ async def process_photos(message: types.Message, state: FSMContext, lang: str):
 @router.message(AdCreationStates.photos, Command("done"))
 async def photos_done(message: types.Message, state: FSMContext, lang: str):
     data = await state.get_data()
-    photos = data.get("photos", [])
+    photos = normalize_photos(data.get("photos", []))
     ad_id = data.get("ad_id")
+    user_id = message.from_user.id
 
     if len(photos) < 4:
         await message.answer("Min 4 📸")
         return
 
     async with async_session() as session:
-        await session.execute(update(Ad).where(Ad.id == ad_id).values(photos=photos))
+        # 1) Photosni DB ga yozamiz (TEXT bo'lsa ham, JSON bo'lsa ham o'qib ketamiz)
+        # Eng xavfsiz variant: bir marta json string qilib yozamiz
+        await session.execute(update(Ad).where(Ad.id == ad_id).values(photos=json.dumps(photos)))
         await session.commit()
 
-    await message.answer(i18n.get("step_5_phone", lang),
-                         reply_markup=types.ReplyKeyboardRemove(),
-                         parse_mode="HTML")
-    await state.set_state(AdCreationStates.phone)
-
-
-@router.message(AdCreationStates.phone, F.text)
-async def process_phone(message: types.Message, state: FSMContext, lang: str):
-    data = await state.get_data()
-    ad_id = data.get("ad_id")
-    user_id = message.from_user.id
-
-    async with async_session() as session:
-        # 1) Adni olamiz
+        # 2) Adni olamiz
         ad_res = await session.execute(select(Ad).where(Ad.id == ad_id))
         ad = ad_res.scalar_one_or_none()
         if not ad:
             await message.answer("E’lon topilmadi.")
             return
 
-        # 2) Limitlar faqat draft -> pending bo‘layotganda ishlasin
+        # 3) Telefon yo‘q bo‘lsa — qaytib phone so‘raymiz (fallback)
+        if not ad.phone:
+            await message.answer(
+                i18n.get("step_5_phone", lang),
+                reply_markup=types.ReplyKeyboardRemove(),
+                parse_mode="HTML"
+            )
+            await state.set_state(AdCreationStates.phone)
+            return
+
+        # 4) Limitlar faqat draft -> pending bo‘layotganda ishlasin
         if ad.status == "draft":
-            # Kunlik limit: oddiy userga kuniga DAILY_AD_LIMIT ta, super admin cheksiz
             if not is_super_admin(user_id):
                 if not await has_daily_quota(session, user_id):
                     await message.answer(f"❌ Kunlik limit tugadi: {DAILY_AD_LIMIT} ta. Ertaga yana davom etasiz.")
                     return
 
-            # slot limit
             if not await has_free_slot(session, user_id):
                 await message.answer(
                     f"❌ Limit tugagan: {MAX_ADS_PER_USER} ta e’lon pending/active.\n"
@@ -275,17 +347,12 @@ async def process_phone(message: types.Message, state: FSMContext, lang: str):
                 )
                 return
 
-        # 3) draft -> pending
-        await session.execute(
-            update(Ad).where(Ad.id == ad_id).values(
-                phone=message.text,
-                status="pending"
-            )
-        )
+        # 5) ✅ yakuniy submit: draft -> pending
+        await session.execute(update(Ad).where(Ad.id == ad_id).values(status="pending"))
         await session.execute(update(User).where(User.user_id == user_id).values(draft_id=None))
         await session.commit()
 
-    # ✅ notify admins (faqat SUPER_ADMIN'lar admin.py da yuboriladi)
+    # ✅ notify admins
     try:
         from bot.handlers.admin import notify_admins_new_ad
         await notify_admins_new_ad(message.bot, ad_id)
@@ -335,7 +402,6 @@ async def cmd_my_ads(message: types.Message, lang: str):
                 id=ad.id
             )
 
-            # ✅ FAQAT GLAVNI ADMIN bo‘lsa — approve/reject/delete tugmalar chiqadi
             if is_super_admin(user_id):
                 rows = []
                 if ad.status != "active":
@@ -354,7 +420,6 @@ async def cmd_my_ads(message: types.Message, lang: str):
                 kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
                 await message.answer(card, reply_markup=kb, parse_mode="HTML")
             else:
-                # oddiy user: faqat delete
                 kb = types.InlineKeyboardMarkup(inline_keyboard=[
                     [types.InlineKeyboardButton(
                         text=i18n.get("delete_btn", lang),
@@ -381,11 +446,28 @@ async def user_delete_ad_confirm(callback: types.CallbackQuery, lang: str):
 async def confirm_delete_ad(callback: types.CallbackQuery, lang: str):
     ad_id = int(callback.data.split("_")[-1])
 
-    async with async_session() as session:
-        await session.execute(update(Ad).where(Ad.id == ad_id).values(status="deleted"))
-        await session.commit()
+    from config import SUPER_ADMIN_IDS
 
-    await callback.message.edit_text(i18n.get("ad_deleted", lang))
+    async with async_session() as session:
+        res = await session.execute(select(Ad).where(Ad.id == ad_id))
+        ad = res.scalar_one_or_none()
+
+        if not ad:
+            await callback.answer("E’lon topilmadi.", show_alert=True)
+            return
+
+        is_super = int(callback.from_user.id) in set(SUPER_ADMIN_IDS or [])
+        if not is_super and ad.user_id != callback.from_user.id:
+            await callback.answer("Bu e’lonni o‘chira olmaysan.", show_alert=True)
+            return
+
+    ok, deleted_msgs = await delete_ad_everywhere(callback.bot, ad_id)
+
+    if ok:
+        await callback.message.edit_text(f"✅ O‘chirildi.\n🗑 Kanal: {deleted_msgs}\n🗄 DB: o‘chirildi")
+    else:
+        await callback.message.edit_text(f"⚠️ E’lon DB’da topilmadi.\n🗑 Kanal: {deleted_msgs}")
+
     await callback.answer()
 
 

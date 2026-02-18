@@ -52,126 +52,48 @@
 
 # bot/channel_utils.py
 import json
-import logging
-from typing import List, Optional
-
+from datetime import datetime, timedelta
 from aiogram import Bot
-from aiogram.types import InputMediaPhoto, InputMediaVideo
+from aiogram.types import InputMediaPhoto
+from sqlalchemy import select
 
-from config import CHANNEL_ID
-from database.models import Ad
+from database.setup import async_session
+from database.models import GlobalSettings, ChannelPost
 
-logger = logging.getLogger(__name__)
-
-
-def _normalize_photos(photos) -> List[str]:
+def normalize_photos(raw) -> list[str]:
     """
-    ad.photos:
-      - list bo'lishi mumkin
-      - yoki JSON string bo'lishi mumkin: '["fileid1","fileid2"]'
+    DB'dagi photos maydoni:
+    - list bo'lishi kerak (ideal)
+    - eski xatolar sabab str bo'lib qolgan bo'lishi mumkin
+    Shu funksiyada hammasini list[str] ko'rinishiga keltiramiz.
     """
-    if not photos:
+    if not raw:
         return []
 
-    if isinstance(photos, list):
-        return photos
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, str) and x.strip()]
 
-    if isinstance(photos, str):
+    if isinstance(raw, str):
+        s = raw.strip()
+
+        # 1) Birinchi urinish: oddiy json.loads
         try:
-            data = json.loads(photos)
-            if isinstance(data, list):
-                return data
+            obj = json.loads(s)
+            # agar double-dumps bo'lsa: obj yana str bo'ladi
+            if isinstance(obj, str):
+                obj = json.loads(obj)
+            if isinstance(obj, list):
+                return [x for x in obj if isinstance(x, str) and x.strip()]
         except Exception:
             pass
 
+        # 2) Ikkinchi urinish: "" -> " qilib tozalash
+        try:
+            s2 = s.strip('"').replace('""', '"')
+            obj = json.loads(s2)
+            if isinstance(obj, list):
+                return [x for x in obj if isinstance(x, str) and x.strip()]
+        except Exception:
+            return []
+
     return []
-
-
-# def _make_caption(ad) -> str:
-#     title = (getattr(ad, "title", "") or "").strip()
-#     description = (getattr(ad, "description", "") or "").strip()
-#     phone = (getattr(ad, "phone", "") or "").strip()
-
-#     parts = []
-#     if title:
-#         parts.append(f"🏠 {title}")
-#     if description:
-#         parts.append(f"\n{description}")
-#     if phone:
-#         parts.append(f"\n📞 {phone}")
-
-#     return "\n".join(parts).strip()
-
-import html
-
-def _make_caption(ad) -> str:
-    title = (getattr(ad, "title", "") or "").strip()
-    desc  = (getattr(ad, "description", "") or "").strip()
-    price = (getattr(ad, "price", "") or "").strip()
-    phone = (getattr(ad, "phone", "") or "").strip()
-    ad_id = getattr(ad, "id", "")
-    user_id = getattr(ad, "user_id", "")
-
-    caption = f"""🔔 <b>YANGI E'LON</b>
-───────────────────
-
-🌟 <b>{html.escape(title)}</b>
-
-📝 {html.escape(desc)}
-
-💰 <b>Narxi:</b> {html.escape(price)}
-📞 <b>Aloqa:</b> {html.escape(phone)}
-
-───────────────────
-🆔 <b>ID:</b> #ad{ad_id} | User: {user_id}
-"""
-
-    return caption.strip()
-
-async def post_ad_to_channel(bot: Bot, ad: Ad) -> bool:
-    """
-    E'lonni kanalga darhol yuboradi (aiogram).
-    DB ga posted_time yozmaydi (hozir test uchun).
-    """
-    if not CHANNEL_ID:
-        logger.warning("CHANNEL_ID is empty. Check .env")
-        return False
-
-    try:
-        photos = _normalize_photos(ad.photos)
-        video: Optional[str] = getattr(ad, "video", None)
-        caption = _make_caption(ad)
-
-        media = []
-
-        # Video bo'lsa caption video'ga tushadi
-        if video:
-            media.append(InputMediaVideo(media=video, caption=caption, parse_mode="HTML"))
-
-        # Rasmlar: max 10 ta (Telegram limit)
-        if photos:
-            for idx, p in enumerate(photos[:10]):
-                # Agar video bo'lmasa, caption birinchi photo'ga tushadi
-                if not media and idx == 0:
-                    media.append(InputMediaPhoto(media=p, caption=caption, parse_mode="HTML"))
-                else:
-                    media.append(InputMediaPhoto(media=p))
-
-        if media:
-            if len(media) == 1:
-                # Single media
-                if video:
-                    await bot.send_video(chat_id=CHANNEL_ID, video=video, caption=caption, parse_mode="HTML")
-                else:
-                    await bot.send_photo(chat_id=CHANNEL_ID, photo=photos[0], caption=caption, parse_mode="HTML")
-            else:
-                await bot.send_media_group(chat_id=CHANNEL_ID, media=media)
-        else:
-            await bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="HTML")
-
-        logger.info("✅ Posted ad %s to channel", ad.id)
-        return True
-
-    except Exception as e:
-        logger.exception("❌ Failed to post ad %s to channel: %s", getattr(ad, "id", "?"), e)
-        return False

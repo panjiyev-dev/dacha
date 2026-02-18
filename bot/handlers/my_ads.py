@@ -28,7 +28,7 @@ from database.setup import async_session
 
 from bot.permissions import is_admin
 from bot.preview_utils import send_ad_preview
-from bot.channel_utils import post_ad_to_channel
+from bot.utils.channel import post_ad_to_channel
 
 # Agar session olish boshqa joyda bo'lsa, shu importni o'zgartir:
 # from villa_bot.db.session import get_session  # <-- SENDA qanday bo'lsa shunga mosla

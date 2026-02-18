@@ -34,7 +34,9 @@ async def force_reset():
         async with async_session() as session:
             settings = GlobalSettings(
                 id=1, 
-                target_channels=[CHANNEL_ID] if CHANNEL_ID else []
+                target_channels=[CHANNEL_ID] if CHANNEL_ID else [],
+                daily_check_hour=9,
+                daily_check_minute=0
             )
             session.add(settings)
             await session.commit()

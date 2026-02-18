@@ -13,7 +13,8 @@ from database.models import Ad, User, ActivationCode, GlobalSettings
 
 from bot.states import AdminStates
 from bot.utils.i18n import i18n
-from bot.channel_utils import post_ad_to_channel
+# from bot.channel_utils import post_ad_to_channel
+from bot.utils.channel import post_ad_to_channel, delete_ad_everywhere
 from bot.preview_utils import send_ad_preview
 
 from config import SUPER_ADMIN_IDS  # ✅ faqat glavni adminlar
@@ -21,7 +22,7 @@ from config import SUPER_ADMIN_IDS  # ✅ faqat glavni adminlar
 router = Router()
 
 
-def is_super_admin_id(user_id: int) -> bool:
+def is_super_admin(user_id: int) -> bool:
     return int(user_id) in set(SUPER_ADMIN_IDS or [])
 
 
@@ -72,8 +73,10 @@ async def notify_admins_new_ad(bot: Bot, ad_id: int):
 
                 await send_ad_preview(bot, admin_id, ad, kb)
 
-                if ad.photos:
-                    await bot.send_photo(admin_id, ad.photos[0], caption=text, reply_markup=kb, parse_mode="HTML")
+                photos = normalize_photos(ad.photos)
+
+                if photos:
+                    await bot.send_photo(admin_id, photos[0], caption=text, reply_markup=kb, parse_mode="HTML")
                 else:
                     await bot.send_message(admin_id, text, reply_markup=kb, parse_mode="HTML")
 
@@ -83,7 +86,7 @@ async def notify_admins_new_ad(bot: Bot, ad_id: int):
 
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_ad(callback: types.CallbackQuery, lang: str):
-    if not is_super_admin_id(callback.from_user.id):
+    if not is_super_admin(callback.from_user.id):
         await callback.answer("❌ Ruxsat yo‘q", show_alert=True)
         return
 
@@ -111,8 +114,12 @@ async def approve_ad(callback: types.CallbackQuery, lang: str):
         # kanalga post
         try:
             ok = await post_ad_to_channel(callback.bot, ad)
-            if not ok:
-                await callback.message.answer("⚠️ Kanalga yuborib bo‘lmadi. (post_ad_to_channel=False)")
+            # if not ok:
+            #     await callback.message.answer("⚠️ Kanalga yuborib bo‘lmadi. (post_ad_to_channel=False)")
+            if ok:
+                await callback.message.answer("✅ Kanalga yuborildi.")
+            else:
+                await callback.message.answer("⚠️ Kanalga yuborib bo‘lmadi.")
         except Exception as e:
             await callback.message.answer(f"⚠️ Kanalga yuborishda xatolik: {e}")
 
@@ -123,7 +130,7 @@ async def approve_ad(callback: types.CallbackQuery, lang: str):
 
 @router.callback_query(F.data.startswith("reject_"))
 async def reject_ad(callback: types.CallbackQuery, lang: str):
-    if not is_super_admin_id(callback.from_user.id):
+    if not is_super_admin(callback.from_user.id):
         await callback.answer("❌ Ruxsat yo‘q", show_alert=True)
         return
 
@@ -150,24 +157,34 @@ async def reject_ad(callback: types.CallbackQuery, lang: str):
 
 @router.callback_query(F.data.startswith("delete_ad_"))
 async def delete_ad_handler(callback: types.CallbackQuery, lang: str):
-    if not is_super_admin_id(callback.from_user.id):
+    if not is_super_admin(callback.from_user.id):
         await callback.answer("❌ Ruxsat yo‘q", show_alert=True)
         return
 
     ad_id = int(callback.data.split("_")[2])
 
-    async with async_session() as session:
-        await session.execute(delete(Ad).where(Ad.id == ad_id))
-        await session.commit()
+    ok, deleted_msgs = await delete_ad_everywhere(callback.bot, ad_id)
 
-    await callback.message.delete()
-    await callback.message.answer(i18n.get("admin_deleted_db", lang, id=ad_id))
-    await callback.answer(i18n.get("admin_deleted_db", lang, id=ad_id).split('.')[0])
+    try:
+        await callback.message.delete()
+    except:
+        pass
+
+    if ok:
+        await callback.message.answer(
+            f"✅ E’lon o‘chirildi.\n🗑 Kanal message’lari: {deleted_msgs}\n🗄 DB: o‘chirildi"
+        )
+    else:
+        await callback.message.answer(
+            f"⚠️ E’lon DB’da topilmadi (yoki allaqachon o‘chgan).\n🗑 Kanal message’lari: {deleted_msgs}"
+        )
+
+    await callback.answer()
 
 
 @router.message(Command("block_user"))
 async def cmd_block_user(message: types.Message, command: CommandObject, lang: str):
-    if not is_super_admin_id(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     if not command.args:
@@ -186,7 +203,7 @@ async def cmd_block_user(message: types.Message, command: CommandObject, lang: s
 
 @router.message(Command("unblock_user"))
 async def cmd_unblock_user(message: types.Message, command: CommandObject, lang: str):
-    if not is_super_admin_id(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     if not command.args:
@@ -209,7 +226,7 @@ async def cmd_generate_code(message: types.Message, lang: str):
     ✅ Faqat SUPER_ADMIN generatsiya qiladi.
     ✅ 1 martalik activation code.
     """
-    if not is_super_admin_id(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     code = str(uuid.uuid4())[:8].upper()
@@ -235,7 +252,7 @@ async def cmd_generate_code(message: types.Message, lang: str):
 
 @router.message(Command("stats"))
 async def cmd_stats(message: types.Message, lang: str):
-    if not is_super_admin_id(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     async with async_session() as session:
@@ -268,7 +285,7 @@ async def cmd_stats(message: types.Message, lang: str):
 @router.message(Command("settings"))
 async def cmd_settings(message: types.Message, lang: str, user_id: int = None):
     uid = user_id or message.from_user.id
-    if not is_super_admin_id(uid):
+    if not is_super_admin(uid):
         return
 
     async with async_session() as session:
@@ -285,7 +302,8 @@ async def cmd_settings(message: types.Message, lang: str, user_id: int = None):
         f"───────────────────\n\n"
         f"{i18n.get('settings_channels', lang)} <code>{', '.join(settings.target_channels) if settings.target_channels else 'None'}</code>\n"
         f"{i18n.get('settings_freq', lang, h=settings.post_frequency_hours)}\n"
-        f"{i18n.get('settings_dur', lang, h=settings.post_duration_hours)}\n\n"
+        f"{i18n.get('settings_dur', lang, h=settings.post_duration_hours)}\n"
+        f"🕐 Daily check: <code>{(settings.daily_check_hour or 9):02d}:{(settings.daily_check_minute or 0):02d} UTC</code>\n\n"
         f"───────────────────"
     )
 
@@ -293,6 +311,9 @@ async def cmd_settings(message: types.Message, lang: str, user_id: int = None):
         [types.InlineKeyboardButton(text=i18n.get("settings_channels", lang).split(":")[0].strip(), callback_data="set_channels")],
         [types.InlineKeyboardButton(text=i18n.get("settings_freq", lang, h="").split(":")[0].strip(), callback_data="set_freq")],
         [types.InlineKeyboardButton(text=i18n.get("settings_dur", lang, h="").split(":")[0].strip(), callback_data="set_dur")],
+        [types.InlineKeyboardButton(text="🕐 Daily check time", callback_data="set_daily_check")],
+        [types.InlineKeyboardButton(text="🗑️ Postlarni o'chirish", callback_data="cleanup_posts")],
+        [types.InlineKeyboardButton(text="👥 Foydalanuvchilar", callback_data="show_users")],
         [types.InlineKeyboardButton(text=i18n.get("main_menu", lang), callback_data="refresh_settings")]
     ])
 
@@ -301,7 +322,7 @@ async def cmd_settings(message: types.Message, lang: str, user_id: int = None):
 
 @router.callback_query(F.data == "refresh_settings")
 async def refresh_settings(callback: types.CallbackQuery, lang: str):
-    if not is_super_admin_id(callback.from_user.id):
+    if not is_super_admin(callback.from_user.id):
         await callback.answer()
         return
 
@@ -310,9 +331,149 @@ async def refresh_settings(callback: types.CallbackQuery, lang: str):
     await callback.answer()
 
 
-@router.callback_query(F.data.in_({"set_channels", "set_freq", "set_dur"}))
+@router.callback_query(F.data == "cleanup_posts")
+async def cleanup_posts_prompt(callback: types.CallbackQuery, state: FSMContext, lang: str):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    await callback.message.answer(
+        "🗑️ <b>Postlarni o'chirish</b>\n\n"
+        "Barcha postlarni darhol o'chirish uchun \"Hozir\" tugmasini bosing.\n"
+        "Ma'lum vaqtda o'chirish uchun vaqtni kiriting (HH:MM formatda):\n"
+        "Masalan: <code>15:30</code>\n\n"
+        "Yoki \"Bekor qilish\" tugmasini bosing.",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="⚡ Hozir o'chirish", callback_data="cleanup_now")],
+            [types.InlineKeyboardButton(text="🕐 Vaqt kiritish", callback_data="cleanup_schedule")],
+            [types.InlineKeyboardButton(text="❌ Bekor qilish", callback_data="refresh_settings")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cleanup_now")
+async def cleanup_posts_now(callback: types.CallbackQuery, lang: str):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from bot.utils.channel import cleanup_expired_posts
+    await cleanup_expired_posts(callback.bot, force_cleanup=True)
+    
+    await callback.message.answer("✅ Barcha postlar o'chirildi!", parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cleanup_schedule")
+async def cleanup_posts_schedule(callback: types.CallbackQuery, state: FSMContext, lang: str):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    await callback.message.answer(
+        "🕐 <b>Vaqtni kiriting</b>\n\n"
+        "Qaysi vaqtda o'chirish kerak? (HH:MM format)\n"
+        "Masalan: <code>15:30</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_cleanup_time)
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_for_cleanup_time)
+async def process_cleanup_time(message: types.Message, state: FSMContext, lang: str):
+    if not is_super_admin(message.from_user.id):
+        return
+    
+    try:
+        value = message.text.strip()
+        
+        # Parse HH:MM format
+        if ":" not in value:
+            raise ValueError("Format HH:MM kerak")
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError("Format HH:MM kerak")
+        
+        hour = int(parts[0])
+        minute = int(parts[1])
+        
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError("Soat 0-23, daqiqa 0-59 bo'lishi kerak")
+        
+        # Schedule cleanup
+        from bot.logic.automation import scheduler
+        from bot.utils.channel import cleanup_expired_posts
+        
+        # Remove existing scheduled cleanup job if any
+        try:
+            scheduler.remove_job('scheduled_cleanup')
+        except:
+            pass
+        
+        # Store the scheduled time in database for checking
+        async with async_session() as session:
+            from database.models import GlobalSettings
+            res = await session.execute(select(GlobalSettings).where(GlobalSettings.id == 1))
+            settings = res.scalar_one_or_none()
+            
+            if settings:
+                settings.cleanup_hour = hour
+                settings.cleanup_minute = minute
+                await session.commit()
+        
+        # Create a simple interval job that checks every minute
+        def check_and_cleanup():
+            import asyncio
+            from datetime import datetime
+            
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                async def check_time():
+                    now = datetime.utcnow()
+                    print(f"Checking cleanup time: current={now.hour:02d}:{now.minute:02d}, target={hour:02d}:{minute:02d}")
+                    if now.hour == hour and now.minute == minute:
+                        await cleanup_expired_posts(message.bot, force_cleanup=True)
+                
+                loop.run_until_complete(check_time())
+                loop.close()
+            except Exception as e:
+                print(f"Cleanup check error: {e}")
+        
+        scheduler.add_job(
+            check_and_cleanup,
+            'interval',
+            minutes=1,
+            id='scheduled_cleanup'
+        )
+        
+        await message.answer(
+            f"✅ Postlar soat {hour:02d}:{minute:02d} da o'chiriladi!",
+            parse_mode="HTML"
+        )
+        
+        # Show current scheduled jobs for debugging
+        jobs = scheduler.get_jobs()
+        job_info = []
+        for job in jobs:
+            job_info.append(f"{job.id}: {job.next_run_time}")
+        
+        if job_info:
+            await message.answer(f"📅 Active jobs:\n" + "\n".join(job_info))
+        
+    except ValueError as e:
+        await message.answer(f"❌ Xatolik: {str(e)}", parse_mode="HTML")
+    
+    await state.clear()
+
+
+@router.callback_query(F.data.in_({"set_channels", "set_freq", "set_dur", "set_daily_check"}))
 async def process_setting_edit(callback: types.CallbackQuery, state: FSMContext, lang: str):
-    if not is_super_admin_id(callback.from_user.id):
+    if not is_super_admin(callback.from_user.id):
         await callback.answer()
         return
 
@@ -322,7 +483,8 @@ async def process_setting_edit(callback: types.CallbackQuery, state: FSMContext,
     prompts = {
         "set_channels": i18n.get("set_channels_prompt", lang),
         "set_freq": i18n.get("set_freq_prompt", lang),
-        "set_dur": i18n.get("set_dur_prompt", lang)
+        "set_dur": i18n.get("set_dur_prompt", lang),
+        "set_daily_check": "🕐 Daily check time (format: HH:MM, UTC)\nMasalan: 14:30"
     }
 
     await callback.message.answer(f"🛠️ <b>{prompts[action]}</b>", parse_mode="HTML")
@@ -332,7 +494,7 @@ async def process_setting_edit(callback: types.CallbackQuery, state: FSMContext,
 
 @router.message(AdminStates.waiting_for_setting_value)
 async def save_setting_value(message: types.Message, state: FSMContext, lang: str):
-    if not is_super_admin_id(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     data = await state.get_data()
@@ -349,30 +511,186 @@ async def save_setting_value(message: types.Message, state: FSMContext, lang: st
                 settings.target_channels = channels
                 await message.answer(i18n.get("save_success_channels", lang, val=", ".join(channels)), parse_mode="HTML")
             elif setting == "set_freq":
-                val = int(value)
-                if val < 1:
+                val = float(value)
+                if val <= 0:
                     raise ValueError
                 settings.post_frequency_hours = val
                 await message.answer(i18n.get("save_success_freq", lang, val=val), parse_mode="HTML")
             elif setting == "set_dur":
-                val = int(value)
-                if val < 1:
+                val = float(value)
+                if val <= 0:
                     raise ValueError
                 settings.post_duration_hours = val
                 await message.answer(i18n.get("save_success_dur", lang, val=val), parse_mode="HTML")
+            elif setting == "set_daily_check":
+                # Parse HH:MM format
+                if ":" not in value:
+                    raise ValueError("Format HH:MM kerak")
+                parts = value.split(":")
+                if len(parts) != 2:
+                    raise ValueError("Format HH:MM kerak")
+                
+                hour = int(parts[0])
+                minute = int(parts[1])
+                
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    raise ValueError("Soat 0-23, daqiqa 0-59 bo'lishi kerak")
+                
+                settings.daily_check_hour = hour
+                settings.daily_check_minute = minute
+                
+                # Reschedule the job
+                from bot.logic.automation import daily_availability_check, scheduler
+                try:
+                    scheduler.remove_job('daily_check')
+                except:
+                    pass
+                
+                scheduler.add_job(
+                    daily_availability_check,
+                    'cron',
+                    hour=hour,
+                    minute=minute,
+                    args=[message.bot],
+                    id='daily_check'
+                )
+                
+                await message.answer(f"✅ Daily check time set to {hour:02d}:{minute:02d} UTC", parse_mode="HTML")
 
             await session.commit()
             await state.clear()
             await cmd_settings(message, lang)
-        except ValueError:
-            await message.answer(i18n.get("save_error_int", lang), parse_mode="HTML")
+        except ValueError as e:
+            await message.answer(f"❌ Xatolik: {str(e)}", parse_mode="HTML")
             await state.clear()
             await cmd_settings(message, lang)
 
 
+@router.message(Command("users"))
+async def cmd_users(message: types.Message, lang: str):
+    if not is_super_admin(message.from_user.id):
+        return
+
+    async with async_session() as session:
+        res = await session.execute(select(User).order_by(User.user_id))
+        users = res.scalars().all()
+        
+        if not users:
+            await message.answer("❌ Foydalanuvchilar topilmadi", parse_mode="HTML")
+            return
+
+        text = f"👥 <b>Foydalanuvchilar ({len(users)} ta)</b>\n"
+        text += "───────────────────\n\n"
+        
+        for user in users[:10]:  # Birinchi 10 ta foydalanuvchi
+            status = "🟢" if not user.is_blocked else "🔴"
+            lang_flag = {"ru": "🇷🇺", "uz": "🇺🇿", "en": "🇬🇧"}.get(user.language, "❓")
+            sub_status = "✅" if user.subscription_end_date and user.subscription_end_date > datetime.utcnow() else "❌"
+            
+            text += f"{status} <code>{user.user_id}</code> {lang_flag} {sub_status}\n"
+        
+        if len(users) > 10:
+            text += f"\n...va yana {len(users) - 10} ta foydalanuvchi"
+        
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🗑️ Foydalanuvchini o'chirish", callback_data="delete_user_prompt")],
+            [types.InlineKeyboardButton(text="🔙 Orqaga", callback_data="admin_main_menu")]
+        ])
+        
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "delete_user_prompt")
+async def delete_user_prompt(callback: types.CallbackQuery, state: FSMContext, lang: str):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    await callback.message.answer(
+        "🗑️ <b>Foydalanuvchini o'chirish</b>\n\n"
+        "O'chirish uchun foydalanuvchi IDsini kiriting:\n"
+        "Masalan: <code>123456789</code>\n\n"
+        "Yoki /myid komandasi orqali o'zingizni IDingizni bilib oling:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_user_delete)
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_for_user_delete)
+async def process_user_delete(message: types.Message, state: FSMContext, lang: str):
+    if not is_super_admin(message.from_user.id):
+        return
+    
+    try:
+        target_id = int(message.text.strip())
+        
+        # O'zini o'chirmaslik uchun tekshirish
+        if target_id == message.from_user.id:
+            await message.answer("❌ O'zingizni o'chira olmaysiz!", parse_mode="HTML")
+            await state.clear()
+            return
+        
+        async with async_session() as session:
+            # Foydalanuvchini topish
+            user_res = await session.execute(select(User).where(User.user_id == target_id))
+            user = user_res.scalar_one_or_none()
+            
+            if not user:
+                await message.answer(f"❌ Foydalanuvchi topilmadi: {target_id}", parse_mode="HTML")
+                await state.clear()
+                return
+            
+            # Foydalanuvchining e'lonlarini o'chirish
+            from bot.utils.channel import delete_ad_everywhere
+            ads_res = await session.execute(select(Ad).where(Ad.user_id == target_id))
+            ads = ads_res.scalars().all()
+            
+            deleted_count = 0
+            for ad in ads:
+                ok, count = await delete_ad_everywhere(message.bot, ad.id)
+                if ok:
+                    deleted_count += count
+            
+            # Foydalanuvchini o'chirish
+            await session.execute(delete(User).where(User.user_id == target_id))
+            await session.commit()
+            
+            await message.answer(
+                f"✅ Foydalanuvchi {target_id} o'chirildi!\n"
+                f"📊 {len(ads)} ta e'lon va {deleted_count} ta xabar o'chirildi.",
+                parse_mode="HTML"
+            )
+            
+    except ValueError:
+        await message.answer("❌ Noto'g'ri ID formati. Faqat raqam kiriting:", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Xatolik: {str(e)}", parse_mode="HTML")
+    
+    await state.clear()
+
+
+@router.callback_query(F.data == "admin_main_menu")
+async def admin_main_menu(callback: types.CallbackQuery, lang: str):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    await callback.message.delete()
+    await callback.message.answer(
+        "⚙️ <b>Admin Panel</b>\n\n"
+        "📊 /stats - Statistika\n"
+        "👥 /users - Foydalanuvchilar\n"
+        "⚙️ /settings - Sozlamalar\n"
+        "🎫 /generate_code - Kod yaratish",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
 @router.message(Command("user_ads"))
 async def cmd_user_ads(message: types.Message, command: CommandObject, lang: str):
-    if not is_super_admin_id(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     if not command.args:
@@ -409,3 +727,81 @@ async def cmd_user_ads(message: types.Message, command: CommandObject, lang: str
 
     except ValueError:
         await message.answer(i18n.get("admin_invalid_id", lang))
+
+
+# User Management Callback Handlers
+@router.callback_query(F.data == "show_users")
+async def handle_show_users(callback: types.CallbackQuery, lang: str):
+    """Show users list"""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from user_management import show_users_menu
+    await show_users_menu(callback, lang)
+
+
+@router.callback_query(F.data == "refresh_users")
+async def handle_refresh_users(callback: types.CallbackQuery, lang: str):
+    """Refresh users list"""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from user_management import show_users_menu
+    await show_users_menu(callback, lang)
+
+
+@router.callback_query(F.data.startswith("user_detail_"))
+async def handle_user_detail(callback: types.CallbackQuery, lang: str):
+    """Show user details"""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from user_management import show_user_detail
+    await show_user_detail(callback, lang)
+
+
+@router.callback_query(F.data.startswith("block_user_"))
+async def handle_block_user(callback: types.CallbackQuery, lang: str):
+    """Block user"""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from user_management import block_user
+    await block_user(callback, lang)
+
+
+@router.callback_query(F.data.startswith("unblock_user_"))
+async def handle_unblock_user(callback: types.CallbackQuery, lang: str):
+    """Unblock user"""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from user_management import unblock_user
+    await unblock_user(callback, lang)
+
+
+@router.callback_query(F.data.startswith("delete_user_"))
+async def handle_delete_user(callback: types.CallbackQuery, lang: str):
+    """Delete user"""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from user_management import delete_user
+    await delete_user(callback, lang)
+
+
+@router.callback_query(F.data.startswith("confirm_delete_user_"))
+async def handle_confirm_delete_user(callback: types.CallbackQuery, lang: str):
+    """Confirm delete user"""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    
+    from user_management import confirm_delete_user
+    await confirm_delete_user(callback, lang)

@@ -8,7 +8,7 @@ ENV_PATH = os.path.join(BASE_DIR, ".env")
 load_dotenv(ENV_PATH)
 
 # ====== Access policy ======
-DAILY_AD_LIMIT = int(os.getenv('DAILY_AD_LIMIT', '2'))  # oddiy user uchun kunlik limit
+DAILY_AD_LIMIT = int(os.getenv('DAILY_AD_LIMIT', '99'))  # oddiy user uchun kunlik limit
 SUBSCRIPTION_DAYS = int(os.getenv('SUBSCRIPTION_DAYS', '36500'))  # kod bilan kirgan userga qancha kun
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
